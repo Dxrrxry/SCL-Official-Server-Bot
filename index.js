@@ -5,13 +5,13 @@ const {
   SlashCommandBuilder,
   REST,
   Routes,
-  StringSelectMenuBuilder,
   ActionRowBuilder,
   ComponentType,
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
   ChannelType,
+  PermissionFlagsBits,
 } = require("discord.js");
 
 const fs = require("fs");
@@ -22,8 +22,14 @@ const path = require("path");
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 
+// Only leagues can be hosted in this channel
+const LEAGUE_CHANNEL_ID = "1475298597028499606";
+
+// Only members with this role can host leagues
+const HOST_ROLE_ID = "1460146847912952090";
+
 if (!TOKEN || !CLIENT_ID) {
-  console.error("[ERROR] Missing DISCORD_BOT_TOKEN or DISCORD_CLIENT_ID environment variables.");
+  console.error("[ERROR] Missing DISCORD_BOT_TOKEN or DISCORD_CLIENT_ID.");
   process.exit(1);
 }
 
@@ -76,19 +82,13 @@ function generateLeagueId() {
 
 function getMaxPlayers(format) {
   if (format === "2v2") return 4;
-  if (format === "3v3") return 6;
   if (format === "4v4") return 8;
+  if (format === "6v6") return 12;
   return 4;
 }
 
 function formatRegion(region) {
-  const map = {
-    europe: "Europe",
-    asia: "Asia",
-    "north-america": "North America",
-    "south-america": "South America",
-    oceania: "Oceania",
-  };
+  const map = { eu: "EU", na: "NA", sa: "SA", asia: "Asia", ocean: "Ocean" };
   return map[region] || region;
 }
 
@@ -100,412 +100,270 @@ function formatPerks(perks) {
   return perks === "perks" ? "Perks" : "No Perks";
 }
 
-function buildLeagueDescription(league) {
+function buildEmbed(league) {
   const spotsLeft = league.maxPlayers - league.players.length;
-  return [
-    `**Game Type**   ${league.matchFormat.toUpperCase()} • ${formatMatchType(league.matchType)}`,
-    `**Perks**       ${formatPerks(league.perks)}`,
-    `**Region**      ${formatRegion(league.region)}`,
-    `**Host**        <@${league.hostId}>`,
-    `**Players**     ${league.players.length} / ${league.maxPlayers}`,
-    `**Spots Left**  ${spotsLeft}`,
-    `**League ID**   \`${league.id}\``,
-    ``,
-    spotsLeft > 0
-      ? `> Use \`/league join id:${league.id}\` to join!`
-      : `> **Lobby is full! Starting...**`,
-  ].join("\n");
+  const regionDisplay = formatRegion(league.region);
+  const typeDisplay = formatMatchType(league.matchType);
+  const perksDisplay = formatPerks(league.perks);
+
+  const title = `${league.matchFormat} ${typeDisplay} - ${regionDisplay} - ${perksDisplay}`;
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription("A new league has been created! Join below.")
+    .setColor(0x5865f2)
+    .addFields(
+      { name: "Match Format", value: league.matchFormat, inline: true },
+      { name: "Match Type", value: typeDisplay, inline: true },
+      { name: "Perks", value: perksDisplay, inline: true },
+      { name: "Region", value: regionDisplay, inline: true },
+      { name: "Players", value: `${league.players.length}/${league.maxPlayers}`, inline: true },
+      { name: "Spots Left", value: `${spotsLeft}`, inline: true },
+      { name: "Hosted By", value: `<@${league.hostId}>`, inline: true },
+      { name: "League ID", value: `\`${league.id}\``, inline: true },
+      { name: "Status", value: league.status === "open" ? "Active" : league.status === "started" ? "Started" : "Cancelled", inline: true },
+      { name: "Created", value: `<t:${Math.floor(new Date(league.createdAt).getTime() / 1000)}:F>`, inline: false }
+    )
+    .setFooter({ text: "League Bot • Multi-Server" })
+    .setTimestamp();
+
+  return embed;
 }
 
 // ─── REGISTER SLASH COMMANDS ──────────────────────────────────────────────────
 
 async function registerCommands() {
-  const command = new SlashCommandBuilder()
-    .setName("league")
-    .setDescription("Manage leagues")
-    .addSubcommand((sub) =>
-      sub.setName("host").setDescription("Host a new league")
-    )
-    .addSubcommand((sub) =>
-      sub
-        .setName("join")
-        .setDescription("Join a league by ID")
-        .addStringOption((opt) =>
-          opt.setName("id").setDescription("The League ID").setRequired(true)
+  const hostLeague = new SlashCommandBuilder()
+    .setName("host-league")
+    .setDescription("Host a new league")
+    .addStringOption((opt) =>
+      opt
+        .setName("match_format")
+        .setDescription("Select the match format.")
+        .setRequired(true)
+        .addChoices(
+          { name: "2v2", value: "2v2" },
+          { name: "4v4", value: "4v4" },
+          { name: "6v6", value: "6v6" }
         )
     )
-    .addSubcommand((sub) =>
-      sub
-        .setName("cancel")
-        .setDescription("Cancel your hosted league")
-        .addStringOption((opt) =>
-          opt.setName("id").setDescription("The League ID to cancel").setRequired(true)
+    .addStringOption((opt) =>
+      opt
+        .setName("match_type")
+        .setDescription("Select the match type.")
+        .setRequired(true)
+        .addChoices(
+          { name: "Swift Game", value: "swift" },
+          { name: "War Game", value: "war" }
         )
     )
-    .addSubcommand((sub) =>
-      sub.setName("list").setDescription("List all open leagues in this server")
+    .addStringOption((opt) =>
+      opt
+        .setName("match_perks")
+        .setDescription("Select match perks.")
+        .setRequired(true)
+        .addChoices(
+          { name: "Perks", value: "perks" },
+          { name: "No Perks", value: "no-perks" }
+        )
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName("region")
+        .setDescription("Select your region.")
+        .setRequired(true)
+        .addChoices(
+          { name: "EU", value: "eu" },
+          { name: "NA", value: "na" },
+          { name: "SA", value: "sa" },
+          { name: "Asia", value: "asia" },
+          { name: "Ocean", value: "ocean" }
+        )
     );
+
+  const cancelLeague = new SlashCommandBuilder()
+    .setName("cancel-league")
+    .setDescription("Cancel your hosted league")
+    .addStringOption((opt) =>
+      opt.setName("id").setDescription("The League ID to cancel").setRequired(true)
+    );
+
+  const listLeagues = new SlashCommandBuilder()
+    .setName("list-leagues")
+    .setDescription("List all open leagues in this server");
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   try {
     console.log("[bot] Registering slash commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [command.toJSON()] });
+    await rest.put(Routes.applicationCommands(CLIENT_ID), {
+      body: [hostLeague.toJSON(), cancelLeague.toJSON(), listLeagues.toJSON()],
+    });
     console.log("[bot] Slash commands registered.");
   } catch (err) {
     console.error("[bot] Failed to register commands:", err);
   }
 }
 
-// ─── START LEAGUE ─────────────────────────────────────────────────────────────
+// ─── /host-league ─────────────────────────────────────────────────────────────
 
-async function startLeague(leagueId, channel) {
-  const league = getLeague(leagueId);
-  if (!league) return;
-
-  const playerMentions = league.players.map((id) => `<@${id}>`).join(", ");
-
-  try {
-    const thread = await channel.threads.create({
-      name: `League ${leagueId} — ${league.matchFormat.toUpperCase()} ${formatMatchType(league.matchType)}`,
-      type: ChannelType.PrivateThread,
-      reason: `League ${leagueId} started`,
+async function handleHostLeague(interaction) {
+  // Must be in the designated channel
+  if (interaction.channelId !== LEAGUE_CHANNEL_ID) {
+    return interaction.reply({
+      content: `Leagues can only be hosted in <#${LEAGUE_CHANNEL_ID}>.`,
+      ephemeral: true,
     });
-
-    updateLeague(leagueId, { status: "started", threadId: thread.id });
-
-    await thread.send({
-      content:
-        `${playerMentions}\n\n` +
-        `**Your league is starting!**\n\n` +
-        `**League ID:** \`${leagueId}\`\n` +
-        `**Format:** ${league.matchFormat.toUpperCase()} — ${formatMatchType(league.matchType)}\n` +
-        `**Perks:** ${formatPerks(league.perks)}\n` +
-        `**Region:** ${formatRegion(league.region)}\n` +
-        `**Host:** <@${league.hostId}>\n\n` +
-        `Good luck everyone!`,
-    });
-
-    for (const playerId of league.players) {
-      try { await thread.members.add(playerId); } catch (_) {}
-    }
-  } catch (err) {
-    console.error("[bot] Could not create private thread:", err.message);
-    updateLeague(leagueId, { status: "started" });
   }
 
-  await channel.send({
-    embeds: [
-      new EmbedBuilder()
-        .setTitle("League Started!")
-        .setColor(0x57f287)
-        .setDescription(
-          `The lobby is full and the league has started!\n\n` +
-          `**Players:** ${playerMentions}\n` +
-          `**League ID:** \`${leagueId}\`\n\n` +
-          `Check the private thread for details.`
-        )
-        .setTimestamp(),
-    ],
-  });
-}
+  // Must have the host role
+  const member = interaction.member;
+  if (!member.roles.cache.has(HOST_ROLE_ID)) {
+    return interaction.reply({
+      content: `You need the required role to host a league.`,
+      ephemeral: true,
+    });
+  }
 
-// ─── /league host ─────────────────────────────────────────────────────────────
-
-async function handleHost(interaction) {
   await interaction.deferReply({ ephemeral: true });
-  const state = {};
 
-  // Step 1 – Format
-  await interaction.editReply({
-    content: "**Step 1 of 4** — Choose your **Match Format**:",
+  const matchFormat = interaction.options.getString("match_format");
+  const matchType = interaction.options.getString("match_type");
+  const perks = interaction.options.getString("match_perks");
+  const region = interaction.options.getString("region");
+
+  const leagueId = generateLeagueId();
+  const maxPlayers = getMaxPlayers(matchFormat);
+
+  const league = {
+    id: leagueId,
+    hostId: interaction.user.id,
+    hostUsername: interaction.user.username,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    messageId: null,
+    threadId: null,
+    matchFormat,
+    matchType,
+    perks,
+    region,
+    maxPlayers,
+    players: [interaction.user.id],
+    status: "open",
+    createdAt: new Date().toISOString(),
+  };
+
+  setLeague(leagueId, league);
+
+  // Post the lobby embed
+  const lobbyMsg = await interaction.channel.send({
+    embeds: [buildEmbed(league)],
     components: [
       new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId("league_format")
-          .setPlaceholder("Select Match Format")
-          .addOptions([
-            { label: "2v2", value: "2v2", description: "2 players per team" },
-            { label: "3v3", value: "3v3", description: "3 players per team" },
-            { label: "4v4", value: "4v4", description: "4 players per team" },
-          ])
+        new ButtonBuilder()
+          .setCustomId(`join_${leagueId}`)
+          .setLabel("Join League")
+          .setStyle(ButtonStyle.Primary)
       ),
     ],
   });
 
-  const msg1 = await interaction.fetchReply();
-  const col1 = msg1.createMessageComponentCollector({
-    componentType: ComponentType.StringSelect,
-    filter: (i) => i.user.id === interaction.user.id && i.customId === "league_format",
-    time: 60000,
-    max: 1,
-  });
+  updateLeague(leagueId, { messageId: lobbyMsg.id });
 
-  col1.on("collect", async (i1) => {
-    state.matchFormat = i1.values[0];
-    await i1.deferUpdate();
-
-    // Step 2 – Match Type
-    await interaction.editReply({
-      content: `**Step 2 of 4** — Choose your **Match Type** (Format: **${state.matchFormat.toUpperCase()}**):`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("league_type")
-            .setPlaceholder("Select Match Type")
-            .addOptions([
-              { label: "Swift Game", value: "swift", description: "Fast-paced swift game" },
-              { label: "War Game", value: "war", description: "Full war game" },
-            ])
-        ),
-      ],
+  // Open a private thread immediately
+  let thread = null;
+  try {
+    thread = await interaction.channel.threads.create({
+      name: `League ${leagueId} — ${matchFormat} ${formatMatchType(matchType)}`,
+      type: ChannelType.PrivateThread,
+      reason: `League ${leagueId} created`,
     });
-
-    const msg2 = await interaction.fetchReply();
-    const col2 = msg2.createMessageComponentCollector({
-      componentType: ComponentType.StringSelect,
-      filter: (i) => i.user.id === interaction.user.id && i.customId === "league_type",
-      time: 60000,
-      max: 1,
+    await thread.members.add(interaction.user.id);
+    await thread.send({
+      content:
+        `<@${interaction.user.id}> Welcome to your league thread!\n\n` +
+        `**League ID:** \`${leagueId}\`\n` +
+        `**Format:** ${matchFormat} — ${formatMatchType(matchType)}\n` +
+        `**Perks:** ${formatPerks(perks)}\n` +
+        `**Region:** ${formatRegion(region)}\n\n` +
+        `Players who join will be added here automatically. Good luck!`,
     });
-
-    col2.on("collect", async (i2) => {
-      state.matchType = i2.values[0];
-      await i2.deferUpdate();
-
-      // Step 3 – Perks
-      await interaction.editReply({
-        content: `**Step 3 of 4** — Choose **Perks** (${state.matchFormat.toUpperCase()} | ${formatMatchType(state.matchType)}):`,
-        components: [
-          new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId("league_perks")
-              .setPlaceholder("Select Match Perks")
-              .addOptions([
-                { label: "Perks", value: "perks", description: "Play with perks enabled" },
-                { label: "No Perks", value: "no-perks", description: "Play without perks" },
-              ])
-          ),
-        ],
-      });
-
-      const msg3 = await interaction.fetchReply();
-      const col3 = msg3.createMessageComponentCollector({
-        componentType: ComponentType.StringSelect,
-        filter: (i) => i.user.id === interaction.user.id && i.customId === "league_perks",
-        time: 60000,
-        max: 1,
-      });
-
-      col3.on("collect", async (i3) => {
-        state.perks = i3.values[0];
-        await i3.deferUpdate();
-
-        // Step 4 – Region
-        await interaction.editReply({
-          content: `**Step 4 of 4** — Choose your **Region** (${state.matchFormat.toUpperCase()} | ${formatMatchType(state.matchType)} | ${formatPerks(state.perks)}):`,
-          components: [
-            new ActionRowBuilder().addComponents(
-              new StringSelectMenuBuilder()
-                .setCustomId("league_region")
-                .setPlaceholder("Select Region")
-                .addOptions([
-                  { label: "Europe", value: "europe" },
-                  { label: "Asia", value: "asia" },
-                  { label: "North America", value: "north-america" },
-                  { label: "South America", value: "south-america" },
-                  { label: "Oceania", value: "oceania" },
-                ])
-            ),
-          ],
-        });
-
-        const msg4 = await interaction.fetchReply();
-        const col4 = msg4.createMessageComponentCollector({
-          componentType: ComponentType.StringSelect,
-          filter: (i) => i.user.id === interaction.user.id && i.customId === "league_region",
-          time: 60000,
-          max: 1,
-        });
-
-        col4.on("collect", async (i4) => {
-          state.region = i4.values[0];
-          await i4.deferUpdate();
-
-          // Create the league
-          const leagueId = generateLeagueId();
-          const maxPlayers = getMaxPlayers(state.matchFormat);
-
-          const league = {
-            id: leagueId,
-            hostId: interaction.user.id,
-            hostUsername: interaction.user.username,
-            guildId: interaction.guildId,
-            channelId: interaction.channelId,
-            messageId: null,
-            threadId: null,
-            matchFormat: state.matchFormat,
-            matchType: state.matchType,
-            perks: state.perks,
-            region: state.region,
-            maxPlayers,
-            players: [interaction.user.id],
-            status: "open",
-            createdAt: new Date().toISOString(),
-          };
-
-          setLeague(leagueId, league);
-
-          await interaction.editReply({
-            content: `League \`${leagueId}\` created! Check the channel for your lobby.`,
-            components: [],
-          });
-
-          // Post lobby embed
-          const lobbyMsg = await interaction.channel.send({
-            embeds: [
-              new EmbedBuilder()
-                .setTitle("League Lobby Open!")
-                .setColor(0x5865f2)
-                .setDescription(buildLeagueDescription(league))
-                .setFooter({ text: `Use /league join id:${leagueId} to join • /league cancel id:${leagueId} to cancel` })
-                .setTimestamp(),
-            ],
-            components: [
-              new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                  .setCustomId(`join_${leagueId}`)
-                  .setLabel("Join League")
-                  .setStyle(ButtonStyle.Primary)
-              ),
-            ],
-          });
-
-          updateLeague(leagueId, { messageId: lobbyMsg.id });
-
-          // Collect join button clicks
-          const joinCol = lobbyMsg.createMessageComponentCollector({
-            componentType: ComponentType.Button,
-            filter: (i) => i.customId === `join_${leagueId}`,
-          });
-
-          joinCol.on("collect", async (btnInt) => {
-            const fresh = getLeague(leagueId);
-            if (!fresh || fresh.status !== "open") {
-              return btnInt.reply({ content: "This league is no longer open.", ephemeral: true });
-            }
-            if (fresh.players.includes(btnInt.user.id)) {
-              return btnInt.reply({ content: "You are already in this league!", ephemeral: true });
-            }
-            if (fresh.players.length >= fresh.maxPlayers) {
-              return btnInt.reply({ content: "This league is full!", ephemeral: true });
-            }
-
-            const updated = updateLeague(leagueId, { players: [...fresh.players, btnInt.user.id] });
-
-            await btnInt.reply({ content: `You joined league **\`${leagueId}\`**! Good luck!`, ephemeral: true });
-
-            const isFull = updated.players.length >= updated.maxPlayers;
-
-            await lobbyMsg.edit({
-              embeds: [
-                new EmbedBuilder()
-                  .setTitle(isFull ? "League Lobby — FULL!" : "League Lobby Open!")
-                  .setColor(isFull ? 0x57f287 : 0x5865f2)
-                  .setDescription(buildLeagueDescription(updated))
-                  .setFooter({ text: `Use /league join id:${leagueId} to join • /league cancel id:${leagueId} to cancel` })
-                  .setTimestamp(),
-              ],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`join_${leagueId}`)
-                    .setLabel(isFull ? "Lobby Full" : "Join League")
-                    .setStyle(isFull ? ButtonStyle.Secondary : ButtonStyle.Primary)
-                    .setDisabled(isFull)
-                ),
-              ],
-            });
-
-            if (isFull) {
-              joinCol.stop("full");
-              await startLeague(leagueId, interaction.channel);
-            }
-          });
-        });
-
-        col4.on("end", (_, r) => {
-          if (r === "time") interaction.editReply({ content: "Setup timed out. Please try again.", components: [] }).catch(() => {});
-        });
-      });
-
-      col3.on("end", (_, r) => {
-        if (r === "time") interaction.editReply({ content: "Setup timed out. Please try again.", components: [] }).catch(() => {});
-      });
-    });
-
-    col2.on("end", (_, r) => {
-      if (r === "time") interaction.editReply({ content: "Setup timed out. Please try again.", components: [] }).catch(() => {});
-    });
-  });
-
-  col1.on("end", (_, r) => {
-    if (r === "time") interaction.editReply({ content: "Setup timed out. Please try again.", components: [] }).catch(() => {});
-  });
-}
-
-// ─── /league join ─────────────────────────────────────────────────────────────
-
-async function handleJoin(interaction) {
-  const leagueId = interaction.options.getString("id").toUpperCase();
-  await interaction.deferReply({ ephemeral: true });
-
-  const league = getLeague(leagueId);
-  if (!league) return interaction.editReply({ content: `No league found with ID \`${leagueId}\`.` });
-  if (league.status !== "open") return interaction.editReply({ content: `League \`${leagueId}\` is no longer open.` });
-  if (league.players.includes(interaction.user.id)) return interaction.editReply({ content: `You are already in league \`${leagueId}\`!` });
-  if (league.players.length >= league.maxPlayers) return interaction.editReply({ content: `League \`${leagueId}\` is full!` });
-
-  const updated = updateLeague(leagueId, { players: [...league.players, interaction.user.id] });
+    updateLeague(leagueId, { threadId: thread.id });
+  } catch (err) {
+    console.error("[bot] Could not create private thread:", err.message);
+  }
 
   await interaction.editReply({
-    content:
-      `You joined league **\`${leagueId}\`**!\n` +
-      `**Format:** ${updated.matchFormat.toUpperCase()} | **Type:** ${formatMatchType(updated.matchType)} | ` +
-      `**Perks:** ${formatPerks(updated.perks)} | **Region:** ${formatRegion(updated.region)}\n` +
-      `**Players:** ${updated.players.length}/${updated.maxPlayers}`,
+    content: `League \`${leagueId}\` has been created!${thread ? ` Check <#${thread.id}> for your private thread.` : ""}`,
   });
 
-  if (updated.messageId) {
-    try {
-      const msg = await interaction.channel.messages.fetch(updated.messageId);
-      const isFull = updated.players.length >= updated.maxPlayers;
-      await msg.edit({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle(isFull ? "League Lobby — FULL!" : "League Lobby Open!")
-            .setColor(isFull ? 0x57f287 : 0x5865f2)
-            .setDescription(buildLeagueDescription(updated))
-            .setFooter({ text: `Use /league join id:${leagueId} to join • /league cancel id:${leagueId} to cancel` })
-            .setTimestamp(),
-        ],
-        components: [
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`join_${leagueId}`)
-              .setLabel(isFull ? "Lobby Full" : "Join League")
-              .setStyle(isFull ? ButtonStyle.Secondary : ButtonStyle.Primary)
-              .setDisabled(isFull)
-          ),
-        ],
-      });
-      if (isFull) await startLeague(leagueId, interaction.channel);
-    } catch (_) {}
-  }
+  // Collect join button presses
+  const joinCol = lobbyMsg.createMessageComponentCollector({
+    componentType: ComponentType.Button,
+    filter: (i) => i.customId === `join_${leagueId}`,
+  });
+
+  joinCol.on("collect", async (btnInt) => {
+    const fresh = getLeague(leagueId);
+    if (!fresh || fresh.status !== "open") {
+      return btnInt.reply({ content: "This league is no longer open.", ephemeral: true });
+    }
+    if (fresh.players.includes(btnInt.user.id)) {
+      return btnInt.reply({ content: "You are already in this league!", ephemeral: true });
+    }
+    if (fresh.players.length >= fresh.maxPlayers) {
+      return btnInt.reply({ content: "This league is full!", ephemeral: true });
+    }
+
+    const updated = updateLeague(leagueId, { players: [...fresh.players, btnInt.user.id] });
+
+    // Add player to the private thread
+    if (updated.threadId) {
+      try {
+        const t = await interaction.guild.channels.fetch(updated.threadId);
+        if (t) await t.members.add(btnInt.user.id);
+      } catch (_) {}
+    }
+
+    await btnInt.reply({
+      content: `You joined league **\`${leagueId}\`**! Good luck!`,
+      ephemeral: true,
+    });
+
+    const isFull = updated.players.length >= updated.maxPlayers;
+
+    await lobbyMsg.edit({
+      embeds: [buildEmbed(updated)],
+      components: isFull
+        ? []
+        : [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`join_${leagueId}`)
+                .setLabel("Join League")
+                .setStyle(ButtonStyle.Primary)
+            ),
+          ],
+    });
+
+    // Notify thread that league is full
+    if (isFull && updated.threadId) {
+      try {
+        const t = await interaction.guild.channels.fetch(updated.threadId);
+        if (t) {
+          const mentions = updated.players.map((id) => `<@${id}>`).join(", ");
+          await t.send({
+            content: `${mentions}\n\n**The lobby is full! Get ready to play!**`,
+          });
+        }
+      } catch (_) {}
+      joinCol.stop("full");
+    }
+  });
 }
 
-// ─── /league cancel ───────────────────────────────────────────────────────────
+// ─── /cancel-league ───────────────────────────────────────────────────────────
 
-async function handleCancel(interaction) {
+async function handleCancelLeague(interaction) {
   const leagueId = interaction.options.getString("id").toUpperCase();
   await interaction.deferReply({ ephemeral: true });
 
@@ -516,23 +374,27 @@ async function handleCancel(interaction) {
 
   updateLeague(leagueId, { status: "cancelled" });
 
+  // Remove the join button from the lobby message
   if (league.messageId) {
     try {
       const msg = await interaction.channel.messages.fetch(league.messageId);
+      const cancelled = getLeague(leagueId);
       await msg.edit({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("League Cancelled")
-            .setColor(0xed4245)
-            .setDescription(`League \`${leagueId}\` was cancelled by the host.`)
-            .setTimestamp(),
-        ],
+        embeds: [buildEmbed(cancelled)],
         components: [],
       });
     } catch (_) {}
   }
 
-  await interaction.editReply({ content: `League \`${leagueId}\` has been cancelled.` });
+  // Delete the private thread
+  if (league.threadId) {
+    try {
+      const t = await interaction.guild.channels.fetch(league.threadId);
+      if (t) await t.delete(`League ${leagueId} cancelled by host`);
+    } catch (_) {}
+  }
+
+  await interaction.editReply({ content: `League \`${leagueId}\` has been cancelled and the thread has been deleted.` });
 
   await interaction.channel.send({
     embeds: [
@@ -545,22 +407,22 @@ async function handleCancel(interaction) {
   });
 }
 
-// ─── /league list ─────────────────────────────────────────────────────────────
+// ─── /list-leagues ────────────────────────────────────────────────────────────
 
-async function handleList(interaction) {
+async function handleListLeagues(interaction) {
   await interaction.deferReply();
 
   const open = getLeaguesByGuild(interaction.guildId).filter((l) => l.status === "open");
 
   if (open.length === 0) {
-    return interaction.editReply({ content: "No open leagues right now. Use `/league host` to start one!" });
+    return interaction.editReply({ content: "No open leagues right now. Use `/host-league` to start one!" });
   }
 
   const embed = new EmbedBuilder().setTitle(`Open Leagues (${open.length})`).setColor(0x5865f2).setTimestamp();
 
   for (const l of open.slice(0, 10)) {
     embed.addFields({
-      name: `\`${l.id}\` — ${l.matchFormat.toUpperCase()} ${formatMatchType(l.matchType)}`,
+      name: `\`${l.id}\` — ${l.matchFormat} ${formatMatchType(l.matchType)}`,
       value:
         `**Perks:** ${formatPerks(l.perks)} | **Region:** ${formatRegion(l.region)} | ` +
         `**Host:** <@${l.hostId}> | **Spots:** ${l.maxPlayers - l.players.length}/${l.maxPlayers}`,
@@ -584,16 +446,14 @@ client.once(Events.ClientReady, (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand() || interaction.commandName !== "league") return;
+  if (!interaction.isChatInputCommand()) return;
 
-  const sub = interaction.options.getSubcommand();
   try {
-    if (sub === "host") await handleHost(interaction);
-    else if (sub === "join") await handleJoin(interaction);
-    else if (sub === "cancel") await handleCancel(interaction);
-    else if (sub === "list") await handleList(interaction);
+    if (interaction.commandName === "host-league") await handleHostLeague(interaction);
+    else if (interaction.commandName === "cancel-league") await handleCancelLeague(interaction);
+    else if (interaction.commandName === "list-leagues") await handleListLeagues(interaction);
   } catch (err) {
-    console.error(`[bot] Error in /league ${sub}:`, err);
+    console.error(`[bot] Error in /${interaction.commandName}:`, err);
     try {
       const msg = { content: "Something went wrong. Please try again.", ephemeral: true };
       if (interaction.replied || interaction.deferred) await interaction.editReply(msg);
@@ -602,12 +462,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// Prevent crashes from killing the process
 process.on("unhandledRejection", (err) => console.error("[bot] Unhandled rejection:", err));
 process.on("uncaughtException", (err) => console.error("[bot] Uncaught exception:", err));
 
-// Start
 (async () => {
   await registerCommands();
   await client.login(TOKEN);
 })();
+
