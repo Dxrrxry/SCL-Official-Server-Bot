@@ -81,6 +81,32 @@ function getLeaguesByGuild(guildId) {
   return Object.values(loadDB().leagues).filter((l) => l.guildId === guildId);
 }
 
+// ─── PROMOTIONS ───────────────────────────────────────────────────────────────
+
+function getPromotion(id) {
+  const db = loadDB();
+  return (db.promotions || {})[id] || null;
+}
+
+function setPromotion(id, data) {
+  const db = loadDB();
+  if (!db.promotions) db.promotions = {};
+  db.promotions[id] = data;
+  saveDB(db);
+}
+
+function getPromotionsByGuild(guildId) {
+  const db = loadDB();
+  return Object.values(db.promotions || {}).filter((p) => p.guildId === guildId);
+}
+
+function generatePromotionId() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let id = "P";
+  for (let i = 0; i < 5; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
+}
+
 // ─── ANTI-NUKE ────────────────────────────────────────────────────────────────
 
 const nukeTracker = {};
@@ -343,11 +369,27 @@ async function registerCommands() {
     .setName("list-leagues")
     .setDescription("List all open leagues in this server");
 
+  const promotionTime = new SlashCommandBuilder()
+    .setName("promotiontime")
+    .setDescription("Post a server promotion timer")
+    .addStringOption((opt) =>
+      opt.setName("server").setDescription("Name of the server being promoted").setRequired(true)
+    )
+    .addStringOption((opt) =>
+      opt.setName("when").setDescription('When promotion starts (e.g: "1 hour")').setRequired(true)
+    )
+    .addStringOption((opt) =>
+      opt.setName("date").setDescription('Start date in DD/MM/YY format (e.g: "22/3/26")').setRequired(true)
+    )
+    .addStringOption((opt) =>
+      opt.setName("duration").setDescription('How long promotion lasts (e.g: "10 days")').setRequired(true)
+    );
+
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   try {
     console.log("[bot] Registering slash commands...");
     await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: [hostLeague.toJSON(), cancelLeague.toJSON(), listLeagues.toJSON()],
+      body: [hostLeague.toJSON(), cancelLeague.toJSON(), listLeagues.toJSON(), promotionTime.toJSON()],
     });
     console.log("[bot] Slash commands registered.");
   } catch (err) {
@@ -639,6 +681,58 @@ async function handlePrefixKick(message) {
   }
 }
 
+// ─── /promotiontime ───────────────────────────────────────────────────────────
+
+async function handlePromotionTime(interaction) {
+  if (interaction.channelId !== LEAGUE_CHANNEL_ID) {
+    return interaction.reply({ content: `Promotions can only be posted in <#${LEAGUE_CHANNEL_ID}>.`, ephemeral: true });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const server = interaction.options.getString("server");
+  const when = interaction.options.getString("when");
+  const date = interaction.options.getString("date");
+  const duration = interaction.options.getString("duration");
+
+  const promotionId = generatePromotionId();
+
+  const promotion = {
+    id: promotionId,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    postedBy: interaction.user.id,
+    postedByUsername: interaction.user.username,
+    server,
+    when,
+    date,
+    duration,
+    createdAt: new Date().toISOString(),
+  };
+
+  setPromotion(promotionId, promotion);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📣 Server Promotion — ${server}`)
+    .setColor(0x57f287)
+    .addFields(
+      { name: "Server", value: server, inline: true },
+      { name: "Promotion ID", value: `\`${promotionId}\``, inline: true },
+      { name: "Starts In", value: when, inline: true },
+      { name: "Date", value: date, inline: true },
+      { name: "Duration", value: duration, inline: true },
+      { name: "Posted By", value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setFooter({ text: "League Bot • Server Promotions" })
+    .setTimestamp();
+
+  await interaction.channel.send({ embeds: [embed] });
+
+  await interaction.editReply({
+    content: `Your promotion for **${server}** has been posted! (ID: \`${promotionId}\`)`,
+  });
+}
+
 // ─── CLIENT ───────────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -708,6 +802,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName === "host-league") await handleHostLeague(interaction);
     else if (interaction.commandName === "cancel-league") await handleCancelLeague(interaction);
     else if (interaction.commandName === "list-leagues") await handleListLeagues(interaction);
+    else if (interaction.commandName === "promotiontime") await handlePromotionTime(interaction);
   } catch (err) {
     console.error(`[bot] Error in /${interaction.commandName}:`, err);
     try {
@@ -724,53 +819,3 @@ process.on("uncaughtException", (err) => console.error("[bot] Uncaught exception
 (async () => {
   await registerCommands();
   await client.login(TOKEN);
-})();
-// Promotion Database Functions
-const getPromotionTime = async (userId) => {
-    // Logic to retrieve promotion time from the database
-};
-
-const setPromotionTime = async (userId, time) => {
-    // Logic to set promotion time in the database
-};
-
-// Replace existing commands array
-const commands = [
-    // ...other commands
-    {
-        name: 'promotiontime',
-        description: 'Get or set the promotion time',
-        options: [
-            {
-                type: 'STRING',
-                name: 'time',
-                description: 'The promotion time to set',
-                required: false,
-            },
-        ],
-    },
-];
-
-const handlePromotionTime = async (interaction) => {
-    const userId = interaction.user.id;
-    const time = interaction.options.getString('time');
-
-    if (time) {
-        await setPromotionTime(userId, time);
-        await interaction.reply(`Promotion time set to ${time}`);
-    } else {
-        const promotionTime = await getPromotionTime(userId);
-        await interaction.reply(`Your promotion time is ${promotionTime || 'not set'}`);
-    }
-};
-
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isCommand()) return;
-
-    const { commandName } = interaction;
-
-    if (commandName === 'promotiontime') {
-        await handlePromotionTime(interaction);
-    }
-    // ...existing command handlers
-});
