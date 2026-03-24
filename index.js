@@ -773,4 +773,4 @@ client.on('interactionCreate', async (interaction) => {
         await handlePromotionTime(interaction);
     }
     // ...existing command handlers
-};
+});
