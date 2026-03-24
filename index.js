@@ -725,3 +725,4 @@ process.on("uncaughtException", (err) => console.error("[bot] Uncaught exception
   await registerCommands();
   await client.login(TOKEN);
 })();
+
