@@ -819,3 +819,4 @@ process.on("uncaughtException", (err) => console.error("[bot] Uncaught exception
 (async () => {
   await registerCommands();
   await client.login(TOKEN);
+})();
